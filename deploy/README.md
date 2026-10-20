@@ -9,6 +9,12 @@ It does not replace MongoDB or Redis. It joins the existing Toolkit Docker netwo
 在 VPS 上执行：
 
 ```bash
+cd /root
+wget -O sharelatex-git-bridge-docker.tar.gz \
+  https://github.com/laulguo/sharelatex-git-bridge-docker/archive/refs/heads/main.tar.gz
+tar -xzf sharelatex-git-bridge-docker.tar.gz
+mv sharelatex-git-bridge-docker-main sharelatex-git-bridge-docker
+cd sharelatex-git-bridge-docker
 chmod +x deploy/install.sh
 TOOLKIT_DIR=/root/overleaf-toolkit ./deploy/install.sh
 ```

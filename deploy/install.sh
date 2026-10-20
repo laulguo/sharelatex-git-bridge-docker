@@ -25,7 +25,7 @@ fi
 
 read -r -p "ShareLaTeX user email: " USER_EMAIL
 [[ -n "$USER_EMAIL" ]] || die "User email is required"
-GIT_USER_ID="$(docker exec mongo mongo --quiet --eval "db=db.getSiblingDB('sharelatex'); var u=db.users.findOne({email:'$USER_EMAIL'},{_id:1}); if(u) print(u._id);" 2>/dev/null | tail -n 1)"
+GIT_USER_ID="$(docker exec mongo mongo --quiet --eval "db=db.getSiblingDB('sharelatex'); var u=db.users.findOne({email:{\$regex:'^$USER_EMAIL\$',\$options:'i'}},{_id:1}); if(u) print(u._id.valueOf());" 2>/dev/null | tail -n 1 | tr -d '\r')"
 [[ "$GIT_USER_ID" =~ ^[0-9a-f]{24}$ ]] || die "Could not find a ShareLaTeX user for $USER_EMAIL"
 
 rand_secret() { openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
