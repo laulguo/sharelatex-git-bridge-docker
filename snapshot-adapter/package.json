@@ -1,0 +1,14 @@
+{
+  "name": "sharelatex-34-snapshot-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Read-only Snapshot API adapter for ShareLaTeX 3.4.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "mongodb": "6.20.0",
+    "redis": "4.7.0"
+  }
+}

@@ -1,0 +1,8 @@
+deploy/.env
+deploy/runtime/
+git-bridge-node/data/
+git-bridge-node/.env
+**/*.github-token
+**/*.github.json
+**/node_modules/
+**/target/

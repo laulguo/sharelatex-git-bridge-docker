@@ -1,0 +1,21 @@
+services:
+  snapshot-adapter:
+    build: .
+    container_name: sharelatex-snapshot-adapter
+    environment:
+      MONGO_URL: mongodb://mongo/sharelatex
+      MONGO_DATABASE: sharelatex
+      REDIS_URL: redis://redis:6379
+      PORT: 8080
+      ADAPTER_TOKEN: "${ADAPTER_TOKEN:?set ADAPTER_TOKEN in deploy/.env}"
+      GIT_TOKEN: "${GIT_TOKEN:?set GIT_TOKEN in deploy/.env}"
+      GIT_USER_ID: "${GIT_USER_ID:?set GIT_USER_ID in deploy/.env}"
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - sharelatex
+
+networks:
+  sharelatex:
+    external: true
+    name: "${SHARELATEX_NETWORK:-sharelatex-local_default}"

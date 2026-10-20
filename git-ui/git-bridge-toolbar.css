@@ -1,0 +1,50 @@
+.git-bridge-launcher {
+  align-items: center;
+  background: #242b38;
+  border: 0;
+  border-left: 1px solid rgba(255,255,255,.08);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  gap: 7px;
+  height: 56px;
+  padding: 0 18px;
+}
+.git-bridge-launcher:hover { background: #313b4d; }
+.git-bridge-launcher span:first-child { font-size: 20px; line-height: 1; }
+.git-bridge-panel {
+  background: #fff;
+  border: 1px solid #d5dbe5;
+  border-radius: 5px;
+  box-shadow: 0 12px 34px rgba(20,31,48,.28);
+  color: #263241;
+  display: none;
+  font-size: 13px;
+  position: fixed;
+  right: 18px;
+  top: 70px;
+  width: 360px;
+  z-index: 10000;
+}
+.git-bridge-panel.is-open { display: block; }
+.git-bridge-panel-header { align-items: center; background: #242b38; color: #fff; display: flex; justify-content: space-between; padding: 13px 15px; }
+.git-bridge-close { background: transparent; border: 0; color: #fff; cursor: pointer; font-size: 22px; line-height: 1; }
+.git-bridge-status, .git-bridge-url-row, .git-bridge-actions { align-items: center; display: flex; gap: 8px; }
+.git-bridge-status { padding: 14px 15px 8px; }
+.git-bridge-status-dot { background: #8b95a5; border-radius: 50%; height: 8px; width: 8px; }
+.git-bridge-status-dot.is-ready { background: #2f9e62; }
+.git-bridge-status-dot.is-error { background: #d34848; }
+.git-bridge-status-dot.is-checking { background: #d59b28; }
+.git-bridge-label { color: #647184; display: block; font-size: 12px; padding: 4px 15px; }
+.git-bridge-muted { color: #98a2b2; font-weight: normal; }
+.git-bridge-url-row { padding: 0 15px; }
+.git-bridge-url-row input { border: 1px solid #cbd3df; border-radius: 3px; box-sizing: border-box; color: #354052; flex: 1; min-width: 0; padding: 8px; }
+.git-bridge-copy, .git-bridge-refresh { background: #2d6cdf; border: 0; border-radius: 3px; color: #fff; cursor: pointer; padding: 8px 11px; }
+.git-bridge-configure, .git-bridge-pull, .git-bridge-push { background: #2d6cdf; border: 0; border-radius: 3px; color: #fff; cursor: pointer; padding: 8px 11px; }
+.git-bridge-sync-row { display: flex; gap: 8px; padding: 10px 15px 2px; }
+.git-bridge-sync-row button { flex: 1; }
+.git-bridge-sync-row button:disabled, .git-bridge-configure:disabled { cursor: wait; opacity: .65; }
+.git-bridge-help { color: #647184; line-height: 1.45; margin: 12px 15px; }
+.git-bridge-actions { border-top: 1px solid #e7ebf0; justify-content: space-between; padding: 12px 15px; }
+.git-bridge-actions a { color: #2d6cdf; text-decoration: none; }

@@ -1,0 +1,9 @@
+{
+  "name": "sharelatex-34-git-bridge-node",
+  "private": true,
+  "version": "0.1.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
