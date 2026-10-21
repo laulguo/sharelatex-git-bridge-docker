@@ -1,5 +1,7 @@
 # ShareLaTeX Git Bridge (Docker add-on)
 
+[English](README.en.md) | 中文
+
 给旧版 ShareLaTeX **3.4.0** 补上 Git：`clone` / `pull` / `push`、GitHub·Gitee·GitLab 远程同步，
 以及编辑器里的 Git 面板。
 
@@ -62,7 +64,7 @@ MongoDB / Redis 文档结构、`fileRefs` 附件模型和 filestore 目录布局
 - 只支持 `refs/heads/main`，没有多分支、tag、merge / rebase / 冲突自动解决；
 - 一次 push 只能更新一个 ref（钩子会拒绝多条 ref 更新）；
 - 快照只导出**当前版本**，`saved_vers` 恒返回 `[]`，历史版本尚未实现；
-- 单文件上限 `MAX_FILE_SIZE`（默认 50MB），单次推送上限 2000 个文件；
+- 单文件上限 50MB，单次推送上限 2000 个文件；
 - 附件只能跟当前 `fileRefs` 走，MongoDB 里没有独立 `files` 集合可查历史；
 - Git 侧只有一套共享凭据，没有按 ShareLaTeX 用户细分的 token。
 
@@ -154,6 +156,9 @@ TOOLKIT_DIR=/root/overleaf-toolkit ./deploy/install.sh
 
 同源反代（`/git-bridge/`）已经烤进 UI 镜像，**不需要**再手改 nginx。
 
+脚本会把上面这些值都写进 `deploy/.env`，装完不用再手改。唯一例外是切到 `token` 模式：
+自己填 `GIT_TOKEN`，再 `docker compose --env-file deploy/.env -f deploy/docker-compose.addon.yml up -d` 让配置生效。
+
 ### 手工安装
 
 ```bash
@@ -171,27 +176,6 @@ cd /root/overleaf-toolkit && bin/up -d
 cd /root/sharelatex-git-bridge-docker
 docker compose --env-file deploy/.env -f deploy/docker-compose.addon.yml up -d --build
 ```
-
-## 环境变量
-
-真正需要你填的就 `deploy/.env` 里这几个，其余都有默认值：
-
-| 变量 | 默认 | 作用 |
-| --- | --- | --- |
-| `SHARELATEX_NETWORK` | 必填 | Toolkit 的 Docker 网络，如 `overleaf_default` |
-| `MONGO_URL` / `REDIS_URL` | `mongodb://mongo/sharelatex` / `redis://redis:6379` | 容器名直连 |
-| `USER_FILES_PATH` | `/root/overleaf-toolkit/data/overleaf/data/user_files` | 宿主 filestore 目录，附件靠它双向同步 |
-| `ADAPTER_TOKEN` / `INTERNAL_HOOK_TOKEN` | 必填 | 内部令牌：bridge↔adapter、git 钩子回调 |
-| `AUTH_MODE` | `trusted` | `trusted` 免口令；`token` 用 `git` + `GIT_TOKEN` |
-| `GITHUB_TOKEN` | 空 | remote URL 未内嵌凭据时的推送令牌 |
-| `CORS_ORIGINS` | 空 | 留空反射请求 `Origin`；也可 `*` 或逗号分隔白名单 |
-| `MAX_FILE_SIZE` | `52428800` | 单文件字节上限（50MB） |
-| `GIT_BRIDGE_BIND` / `GIT_BRIDGE_PORT` | `127.0.0.1` / `18081` | 只给宿主 git CLI 用，浏览器走同源反代 |
-| `GIT_BRIDGE_DATA_PATH` | `./runtime/git-bridge` | bare repo 与 remote 配置存放位置 |
-| `TL2022_REPO` | Utah TL2022 归档 | 仅构建期参数，换 TeX Live 源用 |
-
-`GIT_USERNAME`（默认 `git`）、`GIT_USER_ID`（可留空，只影响 adapter 的可写校验）以及 compose 里
-写死的 `PORT`、`REPO_ROOT`、`SNAPSHOT_API_BASE`、`USER_FILES_DIR`、`MONGO_DATABASE` 一般不用动。
 
 ## 面板与同步
 
@@ -218,7 +202,8 @@ git clone http://<host>:<editor-port>/git-bridge/<project-id>.git
 git clone http://127.0.0.1:18081/<project-id>.git
 ```
 
-`AUTH_MODE=trusted`（默认）不会要口令；`token` 模式下用户名固定 `git`，密码是 `GIT_TOKEN`。
+`AUTH_MODE=trusted`（默认）不会要口令；`token` 模式下用户名固定 `git`，密码是 `GIT_TOKEN`
+（需先在 `deploy/.env` 填好并重建 add-on）。
 
 ### 私有仓库凭据
 
