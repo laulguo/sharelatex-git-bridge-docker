@@ -4,8 +4,22 @@
   var projectMatch = window.location.pathname.match(/\/Project\/([0-9a-f]{24})|\/project\/([0-9a-f]{24})/i)
   if (!projectMatch) return
   var projectId = projectMatch[1] || projectMatch[2]
-  var bridgeUrl = 'http://' + window.location.hostname + ':18081'
-  var repoUrl = bridgeUrl + '/' + projectId + '.git'
+
+  // Resolution order:
+  //   1. window.GIT_BRIDGE_URL, when the deployment injects an explicit base;
+  //   2. same-origin /git-bridge, used when a reverse proxy fronts the bridge;
+  //   3. http://<hostname>:18081, the direct published port.
+  // The first base that answers /health wins, so no port or hostname is baked in.
+  function bridgeCandidates() {
+    if (window.GIT_BRIDGE_URL) return [String(window.GIT_BRIDGE_URL).replace(/\/$/, '')]
+    return [
+      window.location.origin + '/git-bridge',
+      window.location.protocol + '//' + window.location.hostname + ':18081'
+    ]
+  }
+
+  var bridgeUrl = bridgeCandidates()[0]
+  function repoUrl() { return bridgeUrl + '/' + projectId + '.git' }
 
   function copy(text, button) {
     navigator.clipboard.writeText(text).then(function () {
@@ -13,6 +27,13 @@
       button.textContent = 'Copied'
       setTimeout(function () { button.textContent = original }, 1200)
     })
+  }
+
+  function syncUrls(panel) {
+    var input = panel.querySelector('#git-bridge-repo-url')
+    if (input) input.value = repoUrl()
+    var link = panel.querySelector('.git-bridge-actions a')
+    if (link) link.href = repoUrl()
   }
 
   function createPanel() {
@@ -23,17 +44,17 @@
       '<div class="git-bridge-panel-header"><strong>Git</strong><button class="git-bridge-close" type="button" aria-label="Close Git panel">&times;</button></div>',
       '<div class="git-bridge-status"><span class="git-bridge-status-dot"></span><span class="git-bridge-status-text">Checking bridge...</span></div>',
       '<label class="git-bridge-label" for="git-bridge-repo-url">Repository URL</label>',
-      '<div class="git-bridge-url-row"><input id="git-bridge-repo-url" readonly value="' + repoUrl + '"><button class="git-bridge-copy" type="button">Copy</button></div>',
+      '<div class="git-bridge-url-row"><input id="git-bridge-repo-url" readonly value="' + repoUrl() + '"><button class="git-bridge-copy" type="button">Copy</button></div>',
       '<p class="git-bridge-help">Use username <code>git</code> and your Git token when Git asks for credentials.</p>',
       '<label class="git-bridge-label" for="git-bridge-github-url">Git remote (manual sync)</label>',
       '<div class="git-bridge-url-row"><input id="git-bridge-github-url" placeholder="https://git.example.com/owner/repository.git"><button class="git-bridge-configure" type="button">Save</button></div>',
       '<div class="git-bridge-sync-row"><button class="git-bridge-pull" type="button">Pull from remote</button><button class="git-bridge-push" type="button">Push to remote</button></div>',
-      '<div class="git-bridge-actions"><button class="git-bridge-refresh" type="button">Refresh status</button><a href="' + repoUrl + '" target="_blank" rel="noreferrer">Open URL</a></div>'
+      '<div class="git-bridge-actions"><button class="git-bridge-refresh" type="button">Refresh status</button><a href="' + repoUrl() + '" target="_blank" rel="noreferrer">Open URL</a></div>'
     ].join('')
     document.body.appendChild(panel)
 
     panel.querySelector('.git-bridge-close').addEventListener('click', function () { panel.classList.remove('is-open') })
-    panel.querySelector('.git-bridge-copy').addEventListener('click', function () { copy(repoUrl, this) })
+    panel.querySelector('.git-bridge-copy').addEventListener('click', function () { copy(repoUrl(), this) })
     panel.querySelector('.git-bridge-refresh').addEventListener('click', function () { checkStatus(panel) })
     panel.querySelector('.git-bridge-configure').addEventListener('click', function () { githubAction(panel, 'configure') })
     panel.querySelector('.git-bridge-pull').addEventListener('click', function () { githubAction(panel, 'pull') })
@@ -62,19 +83,42 @@
       .finally(function () { setTimeout(function () { button.disabled = false; button.textContent = original }, 1800) })
   }
 
+  // A redirect to the login page also answers 200, so the probe cannot trust
+  // response.ok alone: it must confirm the body is really the bridge payload.
+  function probe(base) {
+    return fetch(base + '/health', { cache: 'no-store' }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status)
+      var type = (response.headers.get('content-type') || '').toLowerCase()
+      if (type.indexOf('application/json') < 0) throw new Error('not the bridge')
+      return response.json().then(function (body) {
+        if (!body || body.ok !== true) throw new Error('not the bridge')
+        return base
+      })
+    })
+  }
+
   function checkStatus(panel) {
     var text = panel.querySelector('.git-bridge-status-text')
     var dot = panel.querySelector('.git-bridge-status-dot')
     text.textContent = 'Checking bridge...'
     dot.className = 'git-bridge-status-dot is-checking'
-    fetch(bridgeUrl + '/health').then(function (response) {
-      if (!response.ok) throw new Error('HTTP ' + response.status)
-      text.textContent = 'Git bridge ready'
-      dot.className = 'git-bridge-status-dot is-ready'
-    }).catch(function () {
-      text.textContent = 'Git bridge unavailable'
-      dot.className = 'git-bridge-status-dot is-error'
-    })
+    var candidates = bridgeCandidates()
+    var index = 0
+    function next() {
+      if (index >= candidates.length) {
+        text.textContent = 'Git bridge unavailable'
+        dot.className = 'git-bridge-status-dot is-error'
+        return
+      }
+      var base = candidates[index++]
+      probe(base).then(function (working) {
+        bridgeUrl = working
+        syncUrls(panel)
+        text.textContent = 'Git bridge ready'
+        dot.className = 'git-bridge-status-dot is-ready'
+      }).catch(function () { next() })
+    }
+    next()
   }
 
   function mount() {

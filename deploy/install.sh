@@ -10,6 +10,10 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 command -v docker >/dev/null || die "Docker is required"
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
 
+# Some older VPS Docker/BuildKit combinations can stall while exporting
+# provenance metadata. The addon does not need attestations to run.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+
 if [[ ! -d "$TOOLKIT_DIR" ]]; then
   read -r -p "Toolkit directory [$TOOLKIT_DIR]: " input
   [[ -n "$input" ]] && TOOLKIT_DIR="$input"
@@ -23,26 +27,30 @@ if [[ -z "$SHARELATEX_NETWORK" ]]; then
 fi
 [[ -n "$SHARELATEX_NETWORK" ]] || die "Docker network is required"
 
-read -r -p "ShareLaTeX user email: " USER_EMAIL
-[[ -n "$USER_EMAIL" ]] || die "User email is required"
-GIT_USER_ID="$(docker exec mongo mongo --quiet --eval "db=db.getSiblingDB('sharelatex'); var u=db.users.findOne({email:{\$regex:'^$USER_EMAIL\$',\$options:'i'}},{_id:1}); if(u) print(u._id.valueOf());" 2>/dev/null | tail -n 1 | tr -d '\r')"
-[[ "$GIT_USER_ID" =~ ^[0-9a-f]{24}$ ]] || die "Could not find a ShareLaTeX user for $USER_EMAIL"
-
 rand_secret() { openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 ADAPTER_TOKEN="$(rand_secret)"
-GIT_TOKEN="$(rand_secret)"
 INTERNAL_HOOK_TOKEN="$(rand_secret)"
+
+# Uploaded binaries live outside MongoDB, in the filestore "fs" directory that
+# backs /var/lib/sharelatex. The adapter has to mount that host path to carry
+# images and PDFs through Git.
+SHARELATEX_DATA_PATH="$(docker inspect sharelatex --format '{{range .Mounts}}{{if eq .Destination "/var/lib/sharelatex"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+SHARELATEX_DATA_PATH="${SHARELATEX_DATA_PATH:-$TOOLKIT_DIR/data/overleaf}"
+USER_FILES_PATH="$SHARELATEX_DATA_PATH/data/user_files"
+[[ -d "$USER_FILES_PATH" ]] || echo "WARNING: user_files directory not found at $USER_FILES_PATH"
 
 umask 077
 cat > "$ENV_FILE" <<EOF
 SHARELATEX_NETWORK=$SHARELATEX_NETWORK
 MONGO_URL=mongodb://mongo/sharelatex
 REDIS_URL=redis://redis:6379
-GIT_USER_ID=$GIT_USER_ID
+AUTH_MODE=trusted
 ADAPTER_TOKEN=$ADAPTER_TOKEN
-GIT_TOKEN=$GIT_TOKEN
+GIT_TOKEN=
 INTERNAL_HOOK_TOKEN=$INTERNAL_HOOK_TOKEN
 GITHUB_TOKEN=
+CORS_ORIGINS=
+USER_FILES_PATH=$USER_FILES_PATH
 EOF
 
 docker build -t sharelatex-local-ui:3.4.0 "$ROOT_DIR/git-ui"
@@ -58,6 +66,11 @@ docker compose --env-file "$ENV_FILE" -f "$DEPLOY_DIR/docker-compose.addon.yml" 
 
 echo
 echo "Addon deployed."
-echo "Git URL: http://localhost:18081/<project-id>.git"
 echo "Environment file: $ENV_FILE"
 echo "Toolkit image override applied: OVERLEAF_IMAGE_NAME=sharelatex-local-ui"
+echo
+echo "The editor panel talks to the bridge on its own origin, at /git-bridge/."
+echo "That route is baked into the UI image (git-ui/sharelatex.conf), so no extra"
+echo "nginx work is needed. Verify with:"
+echo "  curl -s http://127.0.0.1:<editor-port>/git-bridge/health"
+echo "  docker exec sharelatex xelatex --version"

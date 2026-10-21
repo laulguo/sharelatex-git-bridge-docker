@@ -1,4 +1,6 @@
 const http = require('http')
+const fsp = require('fs').promises
+const path = require('path')
 const { ObjectId, MongoClient } = require('mongodb')
 const crypto = require('crypto')
 const { createClient } = require('redis')
@@ -11,6 +13,10 @@ const gitToken = process.env.GIT_TOKEN || ''
 const gitUserId = process.env.GIT_USER_ID || ''
 const maxFileSize = Number(process.env.MAX_FILE_SIZE || 50 * 1024 * 1024)
 const redisUrl = process.env.REDIS_URL || 'redis://redis:6379'
+// ShareLaTeX 3.4.0 keeps uploaded binaries as flat files named
+// "<project-id>_<file-id>" under the filestore "fs" backend. The add-on mounts
+// that directory read/write so attachments can cross the Git boundary.
+const userFilesDir = process.env.USER_FILES_DIR || '/data/user_files'
 
 let db
 let redis
@@ -46,7 +52,46 @@ function authorized(req) {
 }
 
 function safeRelativePath(value) {
-  return Boolean(value && !value.startsWith('/') && !require('path').posix.normalize(value).startsWith('../') && !value.split('/').includes('..'))
+  return Boolean(value && !value.startsWith('/') && !path.posix.normalize(value).startsWith('../') && !value.split('/').includes('..'))
+}
+
+function toObjectId(value) {
+  return ObjectId.isValid(value) ? new ObjectId(value) : value
+}
+
+function userFilePath(projectId, fileId) {
+  return path.join(userFilesDir, `${String(projectId)}_${String(fileId)}`)
+}
+
+// Binaries cannot round-trip through UTF-8, so anything that fails the
+// round-trip (or carries a NUL byte) is treated as an uploaded file rather
+// than a text document. This keeps PDFs, images and fonts out of `docs`.
+function isBinaryContents(buffer) {
+  if (buffer.includes(0)) return true
+  return !Buffer.from(buffer.toString('utf8'), 'utf8').equals(buffer)
+}
+
+// ShareLaTeX stores the git blob hash in `fileRefs[].hash` (see
+// services/web/app/src/Features/FileStore/FileHashManager.js), so this must
+// hash "blob <length>\0" plus the bytes, not the bare bytes.
+function gitBlobHash(buffer) {
+  return crypto.createHash('sha1').update(`blob ${buffer.length}\0`).update(buffer).digest('hex')
+}
+
+function collectFileRefs(folder, prefix, output) {
+  if (!folder || typeof folder !== 'object') return
+  const currentPrefix = prefix && folder.name !== 'rootFolder'
+    ? `${prefix}/${folder.name}`
+    : prefix
+
+  for (const ref of folder.fileRefs || []) {
+    if (ref && ref._id) {
+      output.set(currentPrefix ? `${currentPrefix}/${ref.name}` : ref.name, ref)
+    }
+  }
+  for (const child of folder.folders || []) {
+    collectFileRefs(child, currentPrefix, output)
+  }
 }
 
 function projectIdFrom(pathname) {
@@ -117,7 +162,21 @@ async function getSnapshot(req, res, projectId, requestedVersion) {
   if (Number(requestedVersion) !== latestVersion && !(latestVersion === 0 && Number(requestedVersion) === 0)) {
     return json(res, 404, { status: 404, message: 'Version not found' })
   }
-  return json(res, 200, { srcs, atts: [] })
+
+  // Uploaded binaries live in the filestore, not in `docs`. Without this the
+  // snapshot silently drops every image, PDF and font the project references.
+  const fileRefs = new Map()
+  for (const folder of project.rootFolder || []) collectFileRefs(folder, '', fileRefs)
+  const atts = []
+  for (const [relativePath, ref] of fileRefs) {
+    try {
+      const contents = await fsp.readFile(userFilePath(projectId, ref._id))
+      atts.push({ path: relativePath, content: contents.toString('base64'), hash: ref.hash || gitBlobHash(contents) })
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+  return json(res, 200, { srcs, atts })
 }
 
 function flattenFolder(folder, prefix, result) {
@@ -145,6 +204,7 @@ function folderForPath(rootFolder, relativePath) {
     folder = child
   }
   folder.docs ||= []
+  folder.fileRefs ||= []
   return { folder, name }
 }
 
@@ -152,19 +212,74 @@ function removePath(rootFolder, relativePath) {
   const parts = relativePath.split('/')
   const name = parts.pop()
   let folder = rootFolder.find(item => item.name === 'rootFolder')
-  if (!folder) return
+  if (!folder) return null
   for (const part of parts) {
     folder = (folder.folders || []).find(item => item.name === part)
-    if (!folder) return
+    if (!folder) return null
   }
-  const index = (folder.docs || []).findIndex(item => item.name === name)
-  if (index >= 0) folder.docs.splice(index, 1)
+  const docIndex = (folder.docs || []).findIndex(item => item.name === name)
+  if (docIndex >= 0) return { type: 'doc', entry: folder.docs.splice(docIndex, 1)[0] }
+  const refIndex = (folder.fileRefs || []).findIndex(item => item.name === name)
+  if (refIndex >= 0) return { type: 'file', entry: folder.fileRefs.splice(refIndex, 1)[0] }
+  return null
 }
 
 async function readBody(req) {
   const chunks = []
   for await (const chunk of req) chunks.push(chunk)
   return Buffer.concat(chunks).toString('utf8')
+}
+
+async function writeTextEntry(ctx, relativePath, contents) {
+  const { docs, rootFolder, pathMap, fileMap, projectId, version } = ctx
+  const lines = contents.toString('utf8').split('\n')
+  const asFile = fileMap.get(relativePath)
+  if (asFile) {
+    await fsp.rm(userFilePath(projectId, asFile._id), { force: true })
+    removePath(rootFolder, relativePath)
+    fileMap.delete(relativePath)
+  }
+  const existing = pathMap.get(relativePath)
+  if (existing) {
+    const existingId = toObjectId(existing._id)
+    await docs.updateOne({ _id: existingId }, { $set: { lines, rev: version } })
+    await syncRedisDoc(existingId.toString(), lines, version)
+    return
+  }
+  const location = folderForPath(rootFolder, relativePath)
+  const id = new ObjectId()
+  location.folder.docs.push({ _id: id, name: location.name })
+  await docs.insertOne({ _id: id, name: location.name, lines, project_id: projectId, ranges: {}, rev: 1 })
+  await syncRedisDoc(id.toString(), lines, version)
+  pathMap.set(relativePath, { _id: id, name: location.name })
+}
+
+async function writeBinaryEntry(ctx, relativePath, contents) {
+  const { docs, rootFolder, pathMap, fileMap, projectId } = ctx
+  const asDoc = pathMap.get(relativePath)
+  if (asDoc) {
+    await docs.deleteOne({ _id: toObjectId(asDoc._id) })
+    removePath(rootFolder, relativePath)
+    pathMap.delete(relativePath)
+  }
+  const existing = fileMap.get(relativePath)
+  const fileId = existing && existing._id ? existing._id : new ObjectId()
+  const target = userFilePath(projectId, fileId)
+  await fsp.mkdir(path.dirname(target), { recursive: true })
+  await fsp.writeFile(target, contents)
+  const location = folderForPath(rootFolder, relativePath)
+  location.folder.fileRefs ||= []
+  const ref = {
+    name: location.name,
+    rev: existing?.rev || 0,
+    _id: fileId,
+    hash: gitBlobHash(contents),
+    created: existing && existing.created ? new Date(existing.created) : new Date(),
+  }
+  const refIndex = location.folder.fileRefs.findIndex(item => String(item._id) === String(fileId))
+  if (refIndex >= 0) location.folder.fileRefs[refIndex] = ref
+  else location.folder.fileRefs.push(ref)
+  fileMap.set(relativePath, ref)
 }
 
 async function pushSnapshot(req, res, projectId, auth) {
@@ -180,32 +295,35 @@ async function pushSnapshot(req, res, projectId, auth) {
   if (expectedVersion !== currentVersion) return json(res, 409, { status: 409, message: 'Project is out of date', currentVersion })
   const files = Array.isArray(body.files) ? body.files : []
   if (files.length > 2000) return json(res, 413, { status: 413, message: 'Too many files' })
-  const rootFolder = JSON.parse(JSON.stringify(project.rootFolder || []))
+  // Mutate the document straight out of Mongo instead of deep-cloning it through
+  // JSON: a JSON round-trip turns ObjectIds into hex strings and fileRef
+  // `created` Dates into strings, and the editor calls file.created.getTime(),
+  // which then throws and every compile fails with a 500.
+  const rootFolder = project.rootFolder || []
   const pathMap = new Map()
-  for (const folder of rootFolder) flattenFolder(folder, '', pathMap)
+  const fileMap = new Map()
+  for (const folder of rootFolder) {
+    flattenFolder(folder, '', pathMap)
+    collectFileRefs(folder, '', fileMap)
+  }
   const docs = db.collection('docs')
+  const ctx = { docs, rootFolder, pathMap, fileMap, projectId, version: currentVersion + 1 }
   for (const file of files) {
     if (!safeRelativePath(file.name)) return json(res, 400, { status: 400, message: `Unsafe file path: ${file.name}` })
     if (file.deleted) {
-      const existing = pathMap.get(file.name)
-      if (existing) await docs.deleteOne({ _id: ObjectId.isValid(existing._id) ? new ObjectId(existing._id) : existing._id })
+      const docEntry = pathMap.get(file.name)
+      if (docEntry) await docs.deleteOne({ _id: toObjectId(docEntry._id) })
+      const fileEntry = fileMap.get(file.name)
+      if (fileEntry) await fsp.rm(userFilePath(projectId, fileEntry._id), { force: true })
       removePath(rootFolder, file.name)
+      pathMap.delete(file.name)
+      fileMap.delete(file.name)
       continue
     }
     const contents = file.contentBase64 ? Buffer.from(file.contentBase64, 'base64') : Buffer.from(file.content || '')
     if (contents.length > maxFileSize) return json(res, 413, { status: 413, message: `File too large: ${file.name}` })
-    const existing = pathMap.get(file.name)
-    if (existing) {
-      const existingId = ObjectId.isValid(existing._id) ? new ObjectId(existing._id) : existing._id
-      await docs.updateOne({ _id: existingId }, { $set: { lines: contents.toString('utf8').split('\n'), rev: currentVersion + 1 } })
-      await syncRedisDoc(existingId.toString(), contents.toString('utf8').split('\n'), currentVersion + 1)
-    } else {
-      const id = new ObjectId()
-      const location = folderForPath(rootFolder, file.name)
-      location.folder.docs.push({ _id: id, name: location.name })
-      await docs.insertOne({ _id: id, name: location.name, lines: contents.toString('utf8').split('\n'), project_id: projectId, ranges: {}, rev: 1 })
-      await syncRedisDoc(id.toString(), contents.toString('utf8').split('\n'), currentVersion + 1)
-    }
+    if (isBinaryContents(contents)) await writeBinaryEntry(ctx, file.name, contents)
+    else await writeTextEntry(ctx, file.name, contents)
   }
   const versionId = currentVersion + 1
   await db.collection('projects').updateOne({ _id: projectId }, { $set: { rootFolder, version: versionId, lastUpdated: new Date() } })

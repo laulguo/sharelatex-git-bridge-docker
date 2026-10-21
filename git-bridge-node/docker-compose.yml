@@ -1,13 +1,17 @@
 services:
   git-bridge-node:
-    build: .
+    build:
+      context: .
+      provenance: false
+      sbom: false
     container_name: sharelatex-git-bridge-node
     environment:
       PORT: 8080
       REPO_ROOT: /data/repos
       SNAPSHOT_API_BASE: http://sharelatex-snapshot-adapter:8080
       GIT_USERNAME: git
-      GIT_TOKEN: "${GIT_TOKEN:?set GIT_TOKEN in deploy/.env}"
+      AUTH_MODE: "${AUTH_MODE:-trusted}"
+      GIT_TOKEN: "${GIT_TOKEN:-}"
       ADAPTER_TOKEN: "${ADAPTER_TOKEN:?set ADAPTER_TOKEN in deploy/.env}"
       INTERNAL_HOOK_TOKEN: "${INTERNAL_HOOK_TOKEN:?set INTERNAL_HOOK_TOKEN in deploy/.env}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"

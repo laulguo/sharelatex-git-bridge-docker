@@ -9,6 +9,7 @@ const port = Number(process.env.PORT || 8080)
 const repoRoot = process.env.REPO_ROOT || '/data/repos'
 const snapshotApiBase = (process.env.SNAPSHOT_API_BASE || 'http://snapshot-adapter:8080').replace(/\/$/, '')
 const gitUsername = process.env.GIT_USERNAME || 'git'
+const authMode = process.env.AUTH_MODE || 'token'
 const gitToken = process.env.GIT_TOKEN || ''
 const adapterToken = process.env.ADAPTER_TOKEN || ''
 const internalHookToken = process.env.INTERNAL_HOOK_TOKEN || ''
@@ -18,8 +19,16 @@ const gitHttpBackend = path.join(execFileSync('git', ['--exec-path'], { encoding
 const bootstrapLocks = new Map()
 const pushLocks = new Map()
 
+// The editor page can be served from any host or port, so the allowed origin is
+// configured rather than hardcoded. Unset CORS_ORIGINS reflects the caller's
+// Origin, which makes :2333, :2334, plain HTTP and HTTPS all work unchanged.
+const corsOrigins = (process.env.CORS_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)
 function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', 'http://localhost:2334')
+  const origin = (res.req && res.req.headers && res.req.headers.origin) || ''
+  const wildcard = corsOrigins.includes('*')
+  const allow = wildcard ? '*' : (corsOrigins.length ? (corsOrigins.includes(origin) ? origin : corsOrigins[0]) : (origin || '*'))
+  res.setHeader('Access-Control-Allow-Origin', allow)
+  res.setHeader('Vary', 'Origin')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
@@ -49,6 +58,9 @@ async function bootstrapRepository(projectId) {
     try {
       await runGit(['init', '-b', 'main', workTree]); await runGit(['config', 'user.name', 'ShareLaTeX Git Bridge'], workTree); await runGit(['config', 'user.email', 'git-bridge@localhost'], workTree)
       for (const [contents, relativePath] of snapshot.srcs || []) { if (!safeRelativePath(relativePath)) throw new Error(`Unsafe snapshot path: ${relativePath}`); const target = path.join(workTree, ...relativePath.split('/')); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, contents) }
+      // Attachments are uploaded binaries (images, PDFs, fonts). They arrive
+      // base64 encoded and must be written byte for byte, never as text.
+      for (const att of snapshot.atts || []) { if (!att || !safeRelativePath(att.path)) throw new Error(`Unsafe attachment path: ${att?.path}`); const target = path.join(workTree, ...att.path.split('/')); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, Buffer.from(att.content || '', 'base64')) }
       await runGit(['add', '--all'], workTree); await runGit(['commit', '--allow-empty', '-m', `Import ShareLaTeX version ${doc.latestVerId}`], workTree); await fsp.mkdir(repoRoot, { recursive: true }); await runGit(['clone', '--bare', workTree, repoPath]); await installPushHook(repoPath); return repoPath
     } finally { await fsp.rm(workTree, { recursive: true, force: true }) }
   })()
@@ -58,7 +70,14 @@ async function bootstrapRepository(projectId) {
 
 function parseProject(pathname) { const match = pathname.match(/^\/([0-9a-f]{24})(?:\.git)?(?:\/.*)?$/); return match && match[1] }
 function parseBasicAuth(req) { const value = req.headers.authorization || ''; if (!value.startsWith('Basic ')) return null; const decoded = Buffer.from(value.slice(6), 'base64').toString('utf8'); const split = decoded.indexOf(':'); return split < 0 ? null : { username: decoded.slice(0, split), password: decoded.slice(split + 1) } }
-function requireGitAuth(req, res) { const credentials = parseBasicAuth(req); if (credentials?.username === gitUsername && credentials.password === gitToken) return true; res.setHeader('WWW-Authenticate', 'Basic realm="ShareLaTeX Git Bridge"'); json(res, 401, { status: 401, message: 'Use username git and a Git token as the password' }); return false }
+function requireGitAuth(req, res) {
+  if (authMode === 'trusted') return true
+  const credentials = parseBasicAuth(req)
+  if (credentials?.username === gitUsername && credentials.password === gitToken) return true
+  res.setHeader('WWW-Authenticate', 'Basic realm="ShareLaTeX Git Bridge"')
+  json(res, 401, { status: 401, message: 'Use username git and a Git token as the password' })
+  return false
+}
 function gitTree(repoPath, commit, gitEnv) { return new Promise((resolve, reject) => execFile('git', ['ls-tree', '-r', '-z', '--name-only', commit], { cwd: repoPath, env: { ...process.env, ...gitEnv }, encoding: 'buffer' }, (error, stdout, stderr) => error ? reject(new Error(stderr.toString())) : resolve(stdout.toString().split('\0').filter(Boolean)))) }
 function gitFile(repoPath, commit, relativePath, gitEnv) { return new Promise((resolve, reject) => execFile('git', ['show', `${commit}:${relativePath}`], { cwd: repoPath, env: { ...process.env, ...gitEnv }, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => error ? reject(new Error(stderr.toString())) : resolve(stdout))) }
 async function readBody(req) { const chunks = []; for await (const chunk of req) chunks.push(chunk); return Buffer.concat(chunks).toString('utf8') }

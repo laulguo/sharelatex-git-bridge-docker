@@ -1,6 +1,9 @@
 services:
   snapshot-adapter:
-    build: .
+    build:
+      context: .
+      provenance: false
+      sbom: false
     container_name: sharelatex-snapshot-adapter
     environment:
       MONGO_URL: mongodb://mongo/sharelatex
@@ -10,6 +13,11 @@ services:
       ADAPTER_TOKEN: "${ADAPTER_TOKEN:?set ADAPTER_TOKEN in deploy/.env}"
       GIT_TOKEN: "${GIT_TOKEN:?set GIT_TOKEN in deploy/.env}"
       GIT_USER_ID: "${GIT_USER_ID:?set GIT_USER_ID in deploy/.env}"
+      USER_FILES_DIR: /data/user_files
+    volumes:
+      # Uploaded binaries live here as "<project-id>_<file-id>"; without the
+      # mount the snapshot cannot export or restore attachments.
+      - "${USER_FILES_PATH:-/root/overleaf-toolkit/data/overleaf/data/user_files}:/data/user_files"
     ports:
       - "127.0.0.1:18080:8080"
     networks:

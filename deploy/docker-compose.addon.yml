@@ -2,6 +2,8 @@ services:
   snapshot-adapter:
     build:
       context: ../snapshot-adapter
+      provenance: false
+      sbom: false
     container_name: sharelatex-snapshot-adapter
     restart: unless-stopped
     environment:
@@ -10,14 +12,21 @@ services:
       REDIS_URL: "${REDIS_URL}"
       PORT: 8080
       ADAPTER_TOKEN: "${ADAPTER_TOKEN}"
-      GIT_TOKEN: "${GIT_TOKEN}"
-      GIT_USER_ID: "${GIT_USER_ID}"
+      GIT_TOKEN: "${GIT_TOKEN:-}"
+      USER_FILES_DIR: /data/user_files
+    volumes:
+      # The ShareLaTeX filestore "fs" backend keeps uploaded binaries here as
+      # "<project-id>_<file-id>". Without this mount the snapshot cannot export
+      # images or PDFs and a pull cannot store them.
+      - "${USER_FILES_PATH:-/root/overleaf-toolkit/data/overleaf/data/user_files}:/data/user_files"
     networks:
       - sharelatex
 
   git-bridge-node:
     build:
       context: ../git-bridge-node
+      provenance: false
+      sbom: false
     container_name: sharelatex-git-bridge-node
     restart: unless-stopped
     environment:
@@ -25,10 +34,12 @@ services:
       REPO_ROOT: /data/repos
       SNAPSHOT_API_BASE: http://snapshot-adapter:8080
       GIT_USERNAME: git
-      GIT_TOKEN: "${GIT_TOKEN}"
+      AUTH_MODE: "${AUTH_MODE:-trusted}"
+      GIT_TOKEN: "${GIT_TOKEN:-}"
       ADAPTER_TOKEN: "${ADAPTER_TOKEN}"
       INTERNAL_HOOK_TOKEN: "${INTERNAL_HOOK_TOKEN}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
     ports:
       - "${GIT_BRIDGE_BIND:-127.0.0.1}:${GIT_BRIDGE_PORT:-18081}:8080"
     volumes:
