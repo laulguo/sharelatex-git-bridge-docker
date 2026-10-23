@@ -44,13 +44,28 @@ EOS
   docker exec "$CONTAINER" chmod +x /tmp/parse_missing.sh
 }
 
-# Prints "<root-doc-name>|<compiler>"
+# Prints "<root-doc-name>|<compiler>".
+# The name is resolved from rootFolder, because ShareLaTeX 3.4.0 does not always
+# store a `name` on the docs row itself.
 project_info() {
   docker exec mongo mongo sharelatex --quiet --eval "
     var p = db.projects.findOne({_id: ObjectId('$1')});
-    if (!p) { print('NONE|'); quit(); }
-    var root = p.rootDoc_id ? db.docs.findOne({_id: p.rootDoc_id}) : null;
-    print((root ? root.name : '') + '|' + (p.compiler || 'pdflatex'));" | tr -d '\r'
+    if (!p) { print('|'); quit(); }
+    var target = p.rootDoc_id ? String(p.rootDoc_id.str || p.rootDoc_id) : '';
+    var found = '';
+    (function walk(f, prefix){
+      var cur = f.name === 'rootFolder' ? prefix : (prefix ? prefix + '/' + f.name : f.name);
+      (f.docs || []).forEach(function(d){
+        var id = String(d._id.str || d._id);
+        if (id === target) found = (cur ? cur + '/' : '') + d.name;
+      });
+      (f.folders || []).forEach(function(c){ walk(c, cur); });
+    })(p.rootFolder[0], '');
+    if (!found) {
+      var root = p.rootDoc_id ? db.docs.findOne({_id: p.rootDoc_id}) : null;
+      found = (root && root.name) ? root.name : '';
+    }
+    print(found + '|' + (p.compiler || 'pdflatex'));" | tr -d '\r'
 }
 
 compile_once() {
@@ -81,6 +96,15 @@ autofix() {
   build_dir="$(docker exec "$CONTAINER" sh -c "ls -d /var/lib/sharelatex/data/compiles/${project_id}-*/ 2>/dev/null | head -1" | tr -d '\r')"
   if [ -z "$build_dir" ]; then
     echo "  ! 还没有编译目录：先在编辑器里点一次 Recompile（失败也算）"
+    return 1
+  fi
+
+  # CLSI sometimes leaves only output.* behind; without the sources there is
+  # nothing to compile, so ask for a fresh Recompile instead of failing obscurely.
+  local tex_count
+  tex_count="$(docker exec "$CONTAINER" sh -c "find '$build_dir' -maxdepth 2 -name '*.tex' | wc -l" | tr -d '\r')"
+  if [ "${tex_count:-0}" = "0" ]; then
+    echo "  ! 编译目录里没有 .tex 源文件：请在编辑器里点一次 Recompile 再跑本脚本"
     return 1
   fi
 
