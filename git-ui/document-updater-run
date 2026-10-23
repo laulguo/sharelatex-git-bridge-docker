@@ -1,0 +1,22 @@
+#!/bin/bash
+# Overrides the upstream document-updater runit script.
+#
+# The service only listens on 127.0.0.1 by default, so no other container can
+# reach it. The snapshot adapter needs its delete endpoint to evict a document
+# before a Git pull rewrites it -- otherwise document-updater keeps an in-memory
+# copy and a stale (doclines, DocVersion, docops) triple in Redis, which makes the
+# editor report "doc ops range is not loaded in redis" and swallow later edits.
+#
+# Binding to 0.0.0.0 only widens exposure to the private Docker network: port
+# 3003 is not published, and nginx only proxies port 80. Everything else keeps
+# listening on localhost as before.
+
+export LISTEN_ADDRESS=0.0.0.0
+
+NODE_PARAMS=""
+if [ "$DEBUG_NODE" == "true" ]; then
+    echo "running debug - document updater"
+    NODE_PARAMS="--inspect=0.0.0.0:30030"
+fi
+
+exec /sbin/setuser www-data /usr/bin/node $NODE_PARAMS /overleaf/services/document-updater/app.js >> /var/log/sharelatex/document-updater.log 2>&1

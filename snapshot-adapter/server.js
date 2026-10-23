@@ -3,7 +3,6 @@ const fsp = require('fs').promises
 const path = require('path')
 const { ObjectId, MongoClient } = require('mongodb')
 const crypto = require('crypto')
-const { createClient } = require('redis')
 
 const port = Number(process.env.PORT || 8080)
 const mongoUrl = process.env.MONGO_URL || 'mongodb://mongo/sharelatex'
@@ -12,21 +11,33 @@ const adapterToken = process.env.ADAPTER_TOKEN || ''
 const gitToken = process.env.GIT_TOKEN || ''
 const gitUserId = process.env.GIT_USER_ID || ''
 const maxFileSize = Number(process.env.MAX_FILE_SIZE || 50 * 1024 * 1024)
-const redisUrl = process.env.REDIS_URL || 'redis://redis:6379'
 // ShareLaTeX 3.4.0 keeps uploaded binaries as flat files named
 // "<project-id>_<file-id>" under the filestore "fs" backend. The add-on mounts
 // that directory read/write so attachments can cross the Git boundary.
 const userFilesDir = process.env.USER_FILES_DIR || '/data/user_files'
+// document-updater owns the live document state: an in-memory copy plus a
+// (doclines, DocVersion, docops) triple in Redis. A pull replaces that content,
+// so the document has to be evicted through that service's own API first.
+const docUpdaterUrl = (process.env.DOC_UPDATER_URL || 'http://sharelatex:3003').replace(/\/$/, '')
 
 let db
-let redis
 
-async function syncRedisDoc(docId, lines, version) {
-  if (!redis) return
-  const content = lines.join('\n')
-  await redis.set(`doclines:${docId}`, JSON.stringify(lines))
-  await redis.set(`DocHash:${docId}`, crypto.createHash('sha1').update(content).digest('hex'))
-  await redis.set(`DocVersion:${docId}`, String(version))
+// Evict one document from document-updater. Its delete endpoint flushes pending
+// editor edits to Mongo and then drops the cached state, so the write that
+// follows is the single source of truth and the next open reloads from Mongo.
+// Writing Mongo behind its back instead leaves a version gap in Redis, which the
+// editor reports as "doc ops range is not loaded in redis" and which silently
+// swallows every subsequent edit.
+async function evictDocFromDocUpdater(projectId, docId) {
+  try {
+    const response = await fetch(
+      `${docUpdaterUrl}/project/${projectId}/doc/${docId}?ignore_flush_errors=true`,
+      { method: 'DELETE' }
+    )
+    if (!response.ok) console.error(`docupdater evict ${docId} returned ${response.status}`)
+  } catch (error) {
+    console.error(`docupdater evict ${docId} failed: ${error.message}`)
+  }
 }
 
 function json(res, status, body) {
@@ -242,15 +253,14 @@ async function writeTextEntry(ctx, relativePath, contents) {
   const existing = pathMap.get(relativePath)
   if (existing) {
     const existingId = toObjectId(existing._id)
+    await evictDocFromDocUpdater(projectId, existingId)
     await docs.updateOne({ _id: existingId }, { $set: { lines, rev: version } })
-    await syncRedisDoc(existingId.toString(), lines, version)
     return
   }
   const location = folderForPath(rootFolder, relativePath)
   const id = new ObjectId()
   location.folder.docs.push({ _id: id, name: location.name })
   await docs.insertOne({ _id: id, name: location.name, lines, project_id: projectId, ranges: {}, rev: 1 })
-  await syncRedisDoc(id.toString(), lines, version)
   pathMap.set(relativePath, { _id: id, name: location.name })
 }
 
@@ -258,7 +268,9 @@ async function writeBinaryEntry(ctx, relativePath, contents) {
   const { docs, rootFolder, pathMap, fileMap, projectId } = ctx
   const asDoc = pathMap.get(relativePath)
   if (asDoc) {
-    await docs.deleteOne({ _id: toObjectId(asDoc._id) })
+    const asDocId = toObjectId(asDoc._id)
+    await evictDocFromDocUpdater(projectId, asDocId)
+    await docs.deleteOne({ _id: asDocId })
     removePath(rootFolder, relativePath)
     pathMap.delete(relativePath)
   }
@@ -312,7 +324,11 @@ async function pushSnapshot(req, res, projectId, auth) {
     if (!safeRelativePath(file.name)) return json(res, 400, { status: 400, message: `Unsafe file path: ${file.name}` })
     if (file.deleted) {
       const docEntry = pathMap.get(file.name)
-      if (docEntry) await docs.deleteOne({ _id: toObjectId(docEntry._id) })
+      if (docEntry) {
+        const docEntryId = toObjectId(docEntry._id)
+        await evictDocFromDocUpdater(projectId, docEntryId)
+        await docs.deleteOne({ _id: docEntryId })
+      }
       const fileEntry = fileMap.get(file.name)
       if (fileEntry) await fsp.rm(userFilePath(projectId, fileEntry._id), { force: true })
       removePath(rootFolder, file.name)
@@ -363,9 +379,6 @@ async function main() {
   const client = new MongoClient(mongoUrl)
   await client.connect()
   db = client.db(databaseName)
-  redis = createClient({ url: redisUrl })
-  redis.on('error', error => console.error('redis error', error))
-  await redis.connect()
   const server = http.createServer((req, res) => {
     route(req, res).catch(error => {
       console.error(error)

@@ -21,3 +21,6 @@ COPY editor.pug /overleaf/services/web/app/views/project/editor.pug
 COPY git-bridge-toolbar.js /overleaf/services/web/public/js/git-bridge-toolbar.js
 COPY git-bridge-toolbar.css /overleaf/services/web/public/css/git-bridge-toolbar.css
 COPY sharelatex.conf /etc/nginx/sites-enabled/sharelatex.conf
+# Let the snapshot adapter evict documents through the service's own API. Only
+# this one process binds to 0.0.0.0; port 3003 stays unpublished.
+COPY --chmod=755 document-updater-run /etc/service/document-updater-sharelatex/run

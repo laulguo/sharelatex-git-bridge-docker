@@ -14,6 +14,10 @@ services:
       ADAPTER_TOKEN: "${ADAPTER_TOKEN}"
       GIT_TOKEN: "${GIT_TOKEN:-}"
       USER_FILES_DIR: /data/user_files
+      # A pull must evict the document from document-updater (in-memory + Redis
+      # cache), otherwise edits are swallowed and the editor reports
+      # "doc ops range is not loaded in redis".
+      DOC_UPDATER_URL: "${DOC_UPDATER_URL:-http://sharelatex:3003}"
     volumes:
       # The ShareLaTeX filestore "fs" backend keeps uploaded binaries here as
       # "<project-id>_<file-id>". Without this mount the snapshot cannot export

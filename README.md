@@ -97,6 +97,10 @@ MongoDB / Redis 文档结构、`fileRefs` 附件模型和 filestore 目录布局
 宿主上还有一条 `127.0.0.1:18081 -> git-bridge-node:8080` 的端口映射，只给本机 `git` CLI 用；
 浏览器走的是同源 `/git-bridge/`，不需要开放任何新端口。
 
+document-updater 默认只监听 `127.0.0.1:3003`，别的容器访问不到。`git-ui/document-updater-run`
+用它自己的 runit 脚本把它改成 `0.0.0.0`（**只有这一个进程**，端口不发布到宿主机），
+这样 adapter 才能调用它的删除接口做文档驱逐——见下面「拉取为什么要驱逐文档」。
+
 ## 目录
 
 | 路径 | 说明 |
@@ -328,6 +332,25 @@ docker exec sharelatex xelatex --version
 | PDF / 图片没进仓库 | adapter 日志 + `docker inspect` 挂载 | `USER_FILES_PATH` 没挂进 adapter，或工程本身没有 `fileRefs` |
 | push 后编辑器打不开工程 | Mongo 里 `rootFolder` 的 `_id` / `created` 类型 | 见 `Server Error` 一行，恢复 BSON 类型 |
 | 面板地址解析到 18081 而不是同源 | 同源探测失败 | 确认 UI 镜像含 `sharelatex.conf`；或用 `window.GIT_BRIDGE_URL` 指定基址 |
+| 编辑器里改了内容，编译和 `git clone` 都看不到 | `docker exec sharelatex tail -50 /var/log/sharelatex/web.log` 找 `doc ops range is not loaded in redis` | 文档在 Redis 里的 `(doclines, DocVersion, docops)` 三元组被写坏，版本断层导致 OT 连接失败、改动根本不落库。先清该文档缓存（`DEL doclines:<id> docops:<id> DocVersion:<id> DocHash:<id>`），刷新编辑器；长期靠 adapter 走 docupdater 驱逐，见下节 |
+| 拉取后编辑器仍显示旧内容 | `docker exec sharelatex-snapshot-adapter node -e "fetch('http://sharelatex:3003/status').then(r=>r.text()).then(console.log)"` | 驱逐没生效：确认 `DOC_UPDATER_URL`、`document-updater-run` 是否在镜像里；然后刷新页面 |
+
+### 拉取为什么要驱逐文档
+
+ShareLaTeX 的文档正文不在 Mongo 里"实时"，而是 document-updater 持有的**内存副本 + Redis 三元组**
+（`doclines`、`DocVersion`、`docops`）。Mongo 只是落盘副本，版本号 `rev` 和 Redis 的 `DocVersion`
+是两套计数。
+
+所以 adapter 拉取时**不能只写 Mongo**：
+
+- 只写 Mongo → docupdater 内存里的旧副本下次 flush 会把你的拉取覆盖掉；
+- 手动写 Redis（早期实现）→ 没有 ops 列表却改了 `DocVersion`，客户端一重连就报
+  `doc ops range is not loaded in redis`，之后的编辑全部丢失。
+
+现在的做法是调 docupdater 自己的 `DELETE /project/:pid/doc/:docid?ignore_flush_errors=true`：
+它会先把编辑器里待落盘的内容 flush 到 Mongo，再丢掉内存和 Redis 缓存，然后 adapter 写入拉取的内容，
+下次打开页面从 Mongo 干净加载。代价是**拉取会覆盖该项目在编辑器里的未提交修改**，
+所以拉之前请先关掉该项目的编辑页。
 
 ## 日常运维
 
@@ -378,6 +401,9 @@ TOOLKIT_DIR=/root/overleaf-toolkit ./deploy/uninstall.sh --purge-data   # 连 ba
   否则会被判非快进而拒绝（见排障表）；
 - UI 镜像构建依赖 TL2022 归档仓库，默认指向 Utah 历史归档，网络不便时用 `TL2022_REPO` 换源；
 - 覆盖了上游 `editor.pug` 与 `sharelatex.conf`，上游升级时需重新合并；
+- 覆盖了上游的 `document-updater` runit 脚本，把该服务监听从 `127.0.0.1` 放宽到 `0.0.0.0`
+  （仅 Docker 内网，端口未发布）；上游改这个脚本时也要跟着改；
+- 拉取会覆盖该项目在编辑器里尚未落盘的修改，拉之前请关闭该项目的编辑页；
 - `CORS_ORIGINS` 留空时反射任意 `Origin`，只适合私有部署。
 
 ## 安全注意
@@ -385,6 +411,8 @@ TOOLKIT_DIR=/root/overleaf-toolkit ./deploy/uninstall.sh --purge-data   # 连 ba
 - `AUTH_MODE=trusted`（默认）下，任何能访问 bridge 的人都能 clone / push 任意项目；
   对外暴露前改成 `token` 模式，或在反代层加认证；
 - `token` 模式也只有**一套共享口令**，做不到按用户隔离；需要细分权限得自己加层；
+- `document-updater` 被放宽到监听 `0.0.0.0:3003`（端口未发布，只在内网）。同一 Docker 网络里的
+  任何容器都能调用它的 flush / delete 接口，所以不要往 `overleaf_default` 里塞不可信容器；
 - 面板保存的远程地址（可能含 token）明文落在
   `deploy/runtime/git-bridge/repos/<project-id>.github.json`（`*token` 文件权限 600）；
 - 不要提交 `deploy/.env`、`deploy/runtime/`、MongoDB / Redis 数据或带凭据的 URL；
@@ -402,6 +430,7 @@ git-ui/
   Dockerfile         补 TL2022 引擎 + 覆盖模板 + 烤入 nginx 配置
   editor.pug         上游完整模板，仅加 1 行样式 + 1 行脚本
   sharelatex.conf    nginx：新增 /git-bridge/，其余保持上游
+  document-updater-run  runit 脚本：让 document-updater 监听 0.0.0.0，供 adapter 驱逐文档
   git-bridge-toolbar.{js,css}
 deploy/
   install.sh / uninstall.sh / docker-compose.addon.yml / .env.example
