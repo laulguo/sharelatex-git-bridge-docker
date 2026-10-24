@@ -45,7 +45,8 @@
       '<div class="git-bridge-status"><span class="git-bridge-status-dot"></span><span class="git-bridge-status-text">Checking bridge...</span></div>',
       '<label class="git-bridge-label" for="git-bridge-repo-url">Repository URL</label>',
       '<div class="git-bridge-url-row"><input id="git-bridge-repo-url" readonly value="' + repoUrl() + '"><button class="git-bridge-copy" type="button">Copy</button></div>',
-      '<p class="git-bridge-help">Use username <code>git</code> and your Git token when Git asks for credentials.</p>',
+      '<div class="git-bridge-sync-row"><button class="git-bridge-import" type="button">Import editor changes</button></div>',
+      '<p class="git-bridge-help">Import writes what the editor currently shows into the repository, so a local <code>git pull</code> picks it up.</p>',
       '<label class="git-bridge-label" for="git-bridge-github-url">Git remote (manual sync)</label>',
       '<div class="git-bridge-url-row"><input id="git-bridge-github-url" placeholder="https://git.example.com/owner/repository.git"><button class="git-bridge-configure" type="button">Save</button></div>',
       '<div class="git-bridge-sync-row"><button class="git-bridge-pull" type="button">Pull from remote</button><button class="git-bridge-push" type="button">Push to remote</button></div>',
@@ -59,8 +60,30 @@
     panel.querySelector('.git-bridge-configure').addEventListener('click', function () { githubAction(panel, 'configure') })
     panel.querySelector('.git-bridge-pull').addEventListener('click', function () { githubAction(panel, 'pull') })
     panel.querySelector('.git-bridge-push').addEventListener('click', function () { githubAction(panel, 'push') })
+    panel.querySelector('.git-bridge-import').addEventListener('click', function () { importEditor(panel) })
     loadGithubConfig(panel)
     return panel
+  }
+
+  // Pull the editor's current content into the bare repository. Without this the
+  // repo only ever changes through `git push`, so editor edits never reach Git.
+  function importEditor(panel) {
+    var button = panel.querySelector('.git-bridge-import')
+    var original = button.textContent
+    button.disabled = true
+    button.textContent = 'Importing...'
+    fetch(bridgeUrl + '/api/import/' + projectId, { method: 'POST' })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          if (!response.ok) throw new Error(body.message || 'Import failed')
+          return body
+        })
+      })
+      .then(function (body) {
+        button.textContent = body.changed ? 'Imported ' + String(body.commit).slice(0, 7) : 'Already current'
+      })
+      .catch(function (error) { button.textContent = error.message })
+      .finally(function () { setTimeout(function () { button.disabled = false; button.textContent = original }, 2500) })
   }
 
   function githubEndpoint(action) { return bridgeUrl + '/api/github/' + projectId + (action ? '/' + action : '') }

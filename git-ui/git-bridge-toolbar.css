@@ -41,7 +41,7 @@
 .git-bridge-url-row { padding: 0 15px; }
 .git-bridge-url-row input { border: 1px solid #cbd3df; border-radius: 3px; box-sizing: border-box; color: #354052; flex: 1; min-width: 0; padding: 8px; }
 .git-bridge-copy, .git-bridge-refresh { background: #2d6cdf; border: 0; border-radius: 3px; color: #fff; cursor: pointer; padding: 8px 11px; }
-.git-bridge-configure, .git-bridge-pull, .git-bridge-push { background: #2d6cdf; border: 0; border-radius: 3px; color: #fff; cursor: pointer; padding: 8px 11px; }
+.git-bridge-configure, .git-bridge-pull, .git-bridge-push, .git-bridge-import { background: #2d6cdf; border: 0; border-radius: 3px; color: #fff; cursor: pointer; padding: 8px 11px; }
 .git-bridge-sync-row { display: flex; gap: 8px; padding: 10px 15px 2px; }
 .git-bridge-sync-row button { flex: 1; }
 .git-bridge-sync-row button:disabled, .git-bridge-configure:disabled { cursor: wait; opacity: .65; }

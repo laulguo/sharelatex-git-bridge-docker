@@ -35,7 +35,7 @@ function cors(res) {
 function json(res, status, body) { const payload = JSON.stringify(body); cors(res); res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Content-Length', Buffer.byteLength(payload)); res.end(payload) }
 function safeRelativePath(value) { return Boolean(value && !value.startsWith('/') && !path.posix.normalize(value).startsWith('../') && !value.split('/').includes('..')) }
 function runGit(args, cwd) { return new Promise((resolve, reject) => execFile('git', args, { cwd, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout))) }
-async function fetchJson(url) { const response = await fetch(url, { headers: { Authorization: `Bearer ${adapterToken}` } }); if (!response.ok) throw new Error(`Snapshot API returned ${response.status} for ${url}`); return response.json() }
+async function fetchJson(url, options) { const response = await fetch(url, { ...(options || {}), headers: { Authorization: `Bearer ${adapterToken}`, ...((options && options.headers) || {}) } }); if (!response.ok) throw new Error(`Snapshot API returned ${response.status} for ${url}`); return response.json() }
 async function installPushHook(repoPath) {
   await runGit(['config', 'http.receivepack', 'true'], repoPath)
   await fsp.writeFile(path.join(repoPath, 'hooks', 'pre-receive'), `#!/bin/sh\nexec node /app/push-hook.js "${path.basename(repoPath, '.git')}" "${internalHookToken}" "${repoPath}"\n`, { mode: 0o755 })
@@ -66,6 +66,56 @@ async function bootstrapRepository(projectId) {
   })()
   bootstrapLocks.set(projectId, pending)
   try { return await pending } finally { bootstrapLocks.delete(projectId) }
+}
+
+// Pull the current ShareLaTeX content of a project into its bare repo as a new
+// commit on top of the existing main. bootstrapRepository only runs once (when
+// the repo is missing), so without this an editor edit never reaches Git.
+const importLocks = new Map()
+async function importFromEditor(projectId) {
+  if (importLocks.has(projectId)) return importLocks.get(projectId)
+  const pending = (async () => {
+    // 1. Flush the editor's pending ops into Mongo, otherwise the snapshot is stale.
+    await fetchJson(`${snapshotApiBase}/api/v0/docs/${projectId}/flush`, { method: 'POST' })
+    const doc = await fetchJson(`${snapshotApiBase}/api/v0/docs/${projectId}`)
+    const snapshot = await fetchJson(`${snapshotApiBase}/api/v0/docs/${projectId}/snapshots/${doc.latestVerId}`)
+    const repoPath = await bootstrapRepository(projectId)
+    const workTree = await fsp.mkdtemp(path.join(os.tmpdir(), `import-${projectId}-`))
+    try {
+      await runGit(['init', '-q', '-b', 'main', workTree])
+      for (const [contents, relativePath] of snapshot.srcs || []) {
+        if (!safeRelativePath(relativePath)) throw new Error(`Unsafe snapshot path: ${relativePath}`)
+        const target = path.join(workTree, ...relativePath.split('/'))
+        await fsp.mkdir(path.dirname(target), { recursive: true })
+        await fsp.writeFile(target, contents)
+      }
+      for (const att of snapshot.atts || []) {
+        if (!att || !safeRelativePath(att.path)) throw new Error(`Unsafe attachment path: ${att?.path}`)
+        const target = path.join(workTree, ...att.path.split('/'))
+        await fsp.mkdir(path.dirname(target), { recursive: true })
+        await fsp.writeFile(target, Buffer.from(att.content || '', 'base64'))
+      }
+      await runGit(['add', '--all'], workTree)
+      await runGit(['-c', 'user.name=ShareLaTeX Import', '-c', 'user.email=import@localhost', 'commit', '-q', '--allow-empty', '-m', `Import ShareLaTeX version ${doc.latestVerId}`], workTree)
+      // The tree object only exists in this work tree, so fetch it into the bare repo.
+      await runGit(['--git-dir', repoPath, 'fetch', '-q', '--no-tags', workTree, 'HEAD:refs/import/tmp'])
+      const workTreeId = (await runGit(['--git-dir', repoPath, 'rev-parse', 'refs/import/tmp^{tree}'])).trim()
+      const oldId = (await runGit(['--git-dir', repoPath, 'rev-parse', 'main'])).trim()
+      const oldTree = (await runGit(['--git-dir', repoPath, 'rev-parse', 'main^{tree}'])).trim()
+      if (workTreeId === oldTree) {
+        await runGit(['--git-dir', repoPath, 'update-ref', '-d', 'refs/import/tmp']).catch(() => {})
+        return { changed: false, commit: oldId, version: doc.latestVerId }
+      }
+      const commit = (await runGit(['--git-dir', repoPath, 'commit-tree', workTreeId, '-p', oldId, '-m', `Import ShareLaTeX version ${doc.latestVerId}`])).trim()
+      await runGit(['--git-dir', repoPath, 'update-ref', 'refs/heads/main', commit])
+      await runGit(['--git-dir', repoPath, 'update-ref', '-d', 'refs/import/tmp']).catch(() => {})
+      return { changed: true, commit, previous: oldId, version: doc.latestVerId }
+    } finally {
+      await fsp.rm(workTree, { recursive: true, force: true })
+    }
+  })()
+  importLocks.set(projectId, pending)
+  try { return await pending } finally { importLocks.delete(projectId) }
 }
 
 function parseProject(pathname) { const match = pathname.match(/^\/([0-9a-f]{24})(?:\.git)?(?:\/.*)?$/); return match && match[1] }
@@ -176,5 +226,5 @@ function serveGit(req, res, projectId) {
   }).catch(error => json(res, 404, { status: 404, message: error.message }))
 }
 
-const server = http.createServer((req, res) => { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (req.method === 'OPTIONS') { cors(res); res.statusCode = 204; return res.end() }; if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true }); if (req.method === 'POST' && url.pathname === '/internal/push') return internalPush(req, res, String(req.headers['x-project-id'] || '')).catch(error => json(res, 400, { status: 400, message: error.message })); const githubMatch = url.pathname.match(/^\/api\/github\/([0-9a-f]{24})(?:\/(configure|pull|push|forget))?$/); if (githubMatch) return githubApi(req, res, githubMatch[1], githubMatch[2] || 'status').catch(error => json(res, 400, { status: 400, message: error.message })); if (!requireGitAuth(req, res)) return; const projectId = parseProject(url.pathname); if (!projectId) return json(res, 404, { status: 404, message: 'Project URL must contain a 24-character project id' }); serveGit(req, res, projectId) })
+const server = http.createServer((req, res) => { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (req.method === 'OPTIONS') { cors(res); res.statusCode = 204; return res.end() }; if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true }); if (req.method === 'POST' && url.pathname === '/internal/push') return internalPush(req, res, String(req.headers['x-project-id'] || '')).catch(error => json(res, 400, { status: 400, message: error.message })); const githubMatch = url.pathname.match(/^\/api\/github\/([0-9a-f]{24})(?:\/(configure|pull|push|forget))?$/); if (githubMatch) return githubApi(req, res, githubMatch[1], githubMatch[2] || 'status').catch(error => json(res, 400, { status: 400, message: error.message })); const importMatch = url.pathname.match(/^\/api\/import\/([0-9a-f]{24})$/); if (importMatch && req.method === 'POST') return importFromEditor(importMatch[1]).then(result => json(res, 200, result)).catch(error => json(res, 500, { status: 500, message: error.message })); if (!requireGitAuth(req, res)) return; const projectId = parseProject(url.pathname); if (!projectId) return json(res, 404, { status: 404, message: 'Project URL must contain a 24-character project id' }); serveGit(req, res, projectId) })
 server.listen(port, '0.0.0.0', () => console.log(`node git bridge listening on ${port}`))

@@ -367,6 +367,18 @@ cd "$TOOLKIT_DIR" && bin/up -d
 docker compose --env-file deploy/.env -f deploy/docker-compose.addon.yml up -d --build
 ```
 
+**把编辑器里的改动取回本地**
+
+```bash
+./deploy/tools/import-from-editor.sh <project-id>
+```
+
+`git clone` / `git pull` 拿到的始终是 bare repo 里的那份内容，而 bridge **只在仓库不存在时**
+读一次快照，之后只能靠 `git push` 更新——编辑器里改的东西不会自己回流。这个脚本补上这条路：
+先把编辑器内容 flush 到 Mongo（docupdater 的待落盘 ops 会丢掉如果不 flush），再从 adapter 取
+快照（含附件），然后在现有 `main` 之上追加一个 `Import from ShareLaTeX (auto)` 提交，
+不破坏你 push 过的历史；内容没变时输出 `UNCHANGED`。之后本地 `git pull` 即可。
+
 **补 TeX 包**
 
 ```bash
@@ -395,6 +407,9 @@ TOOLKIT_DIR=/root/overleaf-toolkit ./deploy/uninstall.sh --purge-data   # 连 ba
 ## 已知限制
 
 - 只支持 `refs/heads/main`，没有分支、tag、合并策略；
+- **编辑器改动不会自动回流到仓库**：快照只在 bare repo 不存在时读一次，之后仓库只能被
+  `git push` 更新；要把编辑器内容取到本地必须先跑
+  `deploy/tools/import-from-editor.sh <project-id>`（见「日常运维」）；
 - 快照只覆盖当前版本，`saved_vers` 返回空，历史版本元数据未实现；
 - push 会整体重写被改动的文档（`docs.rev` 递增）；二进制同名路径会复用原 `fileRef._id`；
 - 首次导入生成一个全新提交。远端已有历史时需先把导入结果 rebase 到远端之上再推，

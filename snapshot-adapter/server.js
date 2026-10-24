@@ -349,6 +349,26 @@ async function pushSnapshot(req, res, projectId, auth) {
   return json(res, 200, { versionId })
 }
 
+// Flush every document of a project from document-updater into Mongo, so a
+// subsequent snapshot reflects what the editor currently shows. Without this the
+// import silently captures text that is one or more edits behind.
+async function flushProjectDocs(req, res, projectId) {
+  const rows = await db.collection('docs').find({ project_id: projectId }, { projection: { _id: 1 } }).toArray()
+  let flushed = 0
+  const failures = []
+  for (const row of rows) {
+    const docId = String(row._id)
+    try {
+      const response = await fetch(`${docUpdaterUrl}/project/${projectId}/doc/${docId}/flush`, { method: 'POST' })
+      if (response.ok) flushed++
+      else failures.push(`${docId}:${response.status}`)
+    } catch (error) {
+      failures.push(`${docId}:${error.message}`)
+    }
+  }
+  return json(res, 200, { flushed, total: rows.length, failures })
+}
+
 async function route(req, res) {
   if (req.method === 'GET' && req.url === '/health') return json(res, 200, { ok: true })
   const auth = authorized(req)
@@ -371,6 +391,9 @@ async function route(req, res) {
   }
   if (parts.length === 5 && parts[4] === 'snapshots' && req.method === 'POST') {
     return pushSnapshot(req, res, projectId, auth)
+  }
+  if (parts.length === 5 && parts[4] === 'flush' && req.method === 'POST') {
+    return flushProjectDocs(req, res, projectId)
   }
   return json(res, 404, { status: 404, message: 'Not found' })
 }
