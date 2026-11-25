@@ -98,7 +98,9 @@ async function importFromEditor(projectId) {
       await runGit(['add', '--all'], workTree)
       await runGit(['-c', 'user.name=ShareLaTeX Import', '-c', 'user.email=import@localhost', 'commit', '-q', '--allow-empty', '-m', `Import ShareLaTeX version ${doc.latestVerId}`], workTree)
       // The tree object only exists in this work tree, so fetch it into the bare repo.
-      await runGit(['--git-dir', repoPath, 'fetch', '-q', '--no-tags', workTree, 'HEAD:refs/import/tmp'])
+      // A failed import can leave refs/import/tmp behind; a non-forced refspec then
+      // rejects every later import as a non-fast-forward, so force it.
+      await runGit(['--git-dir', repoPath, 'fetch', '-q', '--no-tags', workTree, '+HEAD:refs/import/tmp'])
       const workTreeId = (await runGit(['--git-dir', repoPath, 'rev-parse', 'refs/import/tmp^{tree}'])).trim()
       const oldId = (await runGit(['--git-dir', repoPath, 'rev-parse', 'main'])).trim()
       const oldTree = (await runGit(['--git-dir', repoPath, 'rev-parse', 'main^{tree}'])).trim()
@@ -106,7 +108,9 @@ async function importFromEditor(projectId) {
         await runGit(['--git-dir', repoPath, 'update-ref', '-d', 'refs/import/tmp']).catch(() => {})
         return { changed: false, commit: oldId, version: doc.latestVerId }
       }
-      const commit = (await runGit(['--git-dir', repoPath, 'commit-tree', workTreeId, '-p', oldId, '-m', `Import ShareLaTeX version ${doc.latestVerId}`])).trim()
+      // commit-tree also needs an identity: the bare repo has none, and a missing
+      // one fails the whole import with "Author identity unknown".
+      const commit = (await runGit(['--git-dir', repoPath, '-c', 'user.name=ShareLaTeX Import', '-c', 'user.email=import@localhost', 'commit-tree', workTreeId, '-p', oldId, '-m', `Import ShareLaTeX version ${doc.latestVerId}`])).trim()
       await runGit(['--git-dir', repoPath, 'update-ref', 'refs/heads/main', commit])
       await runGit(['--git-dir', repoPath, 'update-ref', '-d', 'refs/import/tmp']).catch(() => {})
       return { changed: true, commit, previous: oldId, version: doc.latestVerId }
@@ -196,9 +200,19 @@ async function githubApi(req, res, projectId, action) {
   }
   if (!config) return json(res, 400, { status: 400, message: 'Configure a Git remote first' })
   if (action === 'push') {
-    await runGit(await githubGitArgs(projectId, ['push', 'github', 'main']), repoPath)
-    await writeGithubSyncState(projectId, { lastAppliedCommit: (await runGit(['rev-parse', 'refs/heads/main'], repoPath)).trim() })
-    return json(res, 200, { ok: true, action: 'push' })
+    // Editor edits live in ShareLaTeX, so pushing the bare repo alone would ship a
+    // stale snapshot and still report success. Import first, then push.
+    const imported = await importFromEditor(projectId).catch(error => ({ changed: false, error: error.message }))
+    const localId = (await runGit(['rev-parse', 'refs/heads/main'], repoPath)).trim()
+    const remoteBefore = (await runGit(['rev-parse', 'refs/remotes/github/main'], repoPath).catch(() => '')).trim()
+    try {
+      await runGit(await githubGitArgs(projectId, ['push', 'github', 'main']), repoPath)
+    } catch (error) {
+      return json(res, 502, { status: 502, message: error.message, imported, commit: localId })
+    }
+    await runGit(['fetch', 'github', 'main'], repoPath).catch(() => {})
+    await writeGithubSyncState(projectId, { lastAppliedCommit: localId })
+    return json(res, 200, { ok: true, action: 'push', changed: Boolean(imported.changed), pushed: remoteBefore !== localId, commit: localId, imported })
   }
   if (action === 'pull') {
     await runGit(await githubGitArgs(projectId, ['fetch', 'github', 'main']), repoPath)
