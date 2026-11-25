@@ -327,6 +327,8 @@ docker exec sharelatex xelatex --version
 | 编译 `no output.pdf generated` | `clsi.log` 与编译目录里的 `output.stdout` | `xelatex: not found` → 镜像缺引擎；`File 'x.xx' not found` → `deploy/tools/tex-autofix.sh <project-id>` 补包 |
 | CLSI 报 `files out of sync, please retry` | 同左 | 服务端状态陈旧，web 会自动重试 full sync；持续出现就清 `data/compiles/<project-id>-<user-id>/` 再编 |
 | `! [rejected] main -> main (fetch first)` | 本地 `main` 与远端分叉（比如重新导入过仓库） | 把导入结果 rebase 到远端之上：`git fetch github main`，用 `commit-tree <本地tree> -p <远端tip>` 造提交，`update-ref` 后再 `git push github main` |
+| 面板 Push 显示 `Done`，GitHub 上却没变化 | `curl -X POST http://127.0.0.1:2333/git-bridge/api/github/<pid>/push` 看返回体 | 旧实现只推 bare repo，不导入编辑器内容，远端本来就是这个提交，于是 `Everything up-to-date` 却报成功。现在 push 会先 `importFromEditor`，返回 `{changed, pushed}`：`pushed:false` 表示远端已与本地一致 |
+| 面板 Import 失败：`Author identity unknown`，或之后永远 `non-fast-forward` | `curl -X POST http://127.0.0.1:2333/git-bridge/api/import/<pid>` | ① `git commit-tree` 需要身份，bare repo 里没有，必须带 `-c user.name/-c user.email`；② 上一次失败会留下 `refs/import/tmp`，后续 fetch 被判非快进，refspec 要写 `+HEAD:refs/import/tmp` 强制覆盖 |
 | push 提示 `Project is out of date` | adapter 返回 409 | 推送期间项目在编辑器里被保存过，先同步最新内容再推 |
 | push 被拒 `Only one ref update is supported` | 钩子日志 | 一次只推一个 ref（只有 `main`） |
 | PDF / 图片没进仓库 | adapter 日志 + `docker inspect` 挂载 | `USER_FILES_PATH` 没挂进 adapter，或工程本身没有 `fileRefs` |
